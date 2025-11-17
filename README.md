@@ -43,6 +43,8 @@ A high-performance stress testing tool for Tencent Cloud Key Management Service 
         }
     ]
 }
+```
+
 
 ## Quick Start
 
@@ -50,6 +52,7 @@ A high-performance stress testing tool for Tencent Cloud Key Management Service 
 # Clone and build
 git clone https://github.com/yourusername/kms-stress-tester.git
 cd kms-stress-tester
+```
 
 # Run stress test
 ./scripts/stress-kms.sh
@@ -61,12 +64,14 @@ cd kms-stress-tester
 ```bash
 git clone https://github.com/yourusername/kms-stress-tester.git
 cd kms-stress-tester
+```
 
 ### 2. Build the Project
 
 ```bash
 # Build the executable JAR with all dependencies
 mvn clean package
+```
 
 ### 3. Verify Installation
 
@@ -100,4 +105,5 @@ ROLE	CVM-KMS-full	CVM role name for credentials
 CMK_ID	Required	Your KMS Customer Master Key ID
 DURATION_SECONDS	60	Test duration in seconds
 CONCURRENCY	20	Number of concurrent workers
+```
 
