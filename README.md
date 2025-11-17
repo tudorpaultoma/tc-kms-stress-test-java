@@ -11,6 +11,7 @@ A high-performance stress testing tool for Tencent Cloud Key Management Service 
 - ✅ Configurable test parameters
 - ✅ Temporary credential support via CVM roles
 - ✅ Cross Platform - Runs on any system with Java 11+§
+- ✅ Mixed Encryption/Decryption Testing
 
 
 ## 🛠 Prerequisites
@@ -102,7 +103,7 @@ export CONCURRENCY="50"
 
 REGION	ap-guangzhou	Tencent Cloud region for KMS
 ROLE	CVM-KMS-full	CVM role name for credentials
-CMK_ID	Required	Your KMS Customer Master Key ID
+CMK_ID	optional	Your KMS Customer Master Key ID (will be created if not preset)
 DURATION_SECONDS	60	Test duration in seconds
 CONCURRENCY	20	Number of concurrent workers
 ```
