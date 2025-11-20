@@ -17,24 +17,35 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Main class for Tencent Cloud KMS Stress Testing Tool.
+ * 
+ * This application performs concurrent encryption and decryption operations
+ * against Tencent Cloud KMS to measure performance, throughput (RPS), and
+ * identify bottlenecks under various load conditions.
+ */
 public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
     
-    // Configuration from system properties
+    /**
+     * Retrieves configuration value from system properties with fallback to default.
+     * System properties can be set via -D flags when running the JAR.
+     */
     private static String getConfig(String key, String defaultValue) {
         String value = System.getProperty(key);
         return value != null ? value : defaultValue;
     }
     
+    // Test configuration parameters (can be overridden via system properties)
     private static final String REGION = getConfig("region", "ap-guangzhou");
     private static final String ROLE = getConfig("role", "CVM-KMS-full");
-    private static final String CMK_ID = getConfig("cmkId", ""); // Empty to create temporary key
+    private static final String CMK_ID = getConfig("cmkId", ""); // If empty, a temporary key will be created
     private static final int DURATION_SECONDS = Integer.parseInt(getConfig("duration", "60"));
     private static final int CONCURRENCY = Integer.parseInt(getConfig("concurrency", "20"));
-    private static final double ENCRYPT_RATIO = Double.parseDouble(getConfig("encryptRatio", "0.5")); // NEW: 50% encryption by default
-    private static final double DECRYPT_RATIO = Double.parseDouble(getConfig("decryptRatio", "0.5")); // NEW: 50% decryption by default
+    private static final double ENCRYPT_RATIO = Double.parseDouble(getConfig("encryptRatio", "0.5")); // 50% encryption operations
+    private static final double DECRYPT_RATIO = Double.parseDouble(getConfig("decryptRatio", "0.5")); // 50% decryption operations
     
-    // Statistics - separate counters for each operation
+    // Atomic counters for thread-safe statistics tracking across all worker threads
     private static final AtomicLong encryptSuccessCount = new AtomicLong(0);
     private static final AtomicLong decryptSuccessCount = new AtomicLong(0);
     private static final AtomicLong totalSuccessCount = new AtomicLong(0);
@@ -42,20 +53,33 @@ public class Main {
     private static final AtomicLong totalLatency = new AtomicLong(0);
     private static final AtomicInteger activeThreads = new AtomicInteger(0);
     
-    // Improved statistics tracking
+    // Statistics tracking for periodic reporting (stores last reported values)
     private static final AtomicLong lastEncryptSuccessCount = new AtomicLong(0);
     private static final AtomicLong lastDecryptSuccessCount = new AtomicLong(0);
     private static final AtomicLong lastTotalSuccessCount = new AtomicLong(0);
     private static final AtomicLong lastErrorCount = new AtomicLong(0);
     private static volatile long lastStatsTime = System.currentTimeMillis();
+    
+    // Peak performance tracking
     private static final AtomicDouble peakTotalRps = new AtomicDouble(0);
     private static final AtomicDouble peakEncryptRps = new AtomicDouble(0);
     private static final AtomicDouble peakDecryptRps = new AtomicDouble(0);
 
-    // For encryption/decryption operations
-    private static volatile String testKeyId = null;
-    private static final ConcurrentLinkedQueue<String> ciphertextQueue = new ConcurrentLinkedQueue<>();
+    // Shared resources for encryption/decryption workflow
+    private static volatile String testKeyId = null; // The CMK ID being tested
+    private static final ConcurrentLinkedQueue<String> ciphertextQueue = new ConcurrentLinkedQueue<>(); // Queue of ciphertexts for decryption
 
+    /**
+     * Main entry point for the KMS stress testing application.
+     * 
+     * Workflow:
+     * 1. Initialize KMS client with temporary credentials from CVM role
+     * 2. Create temporary test key (or use provided CMK_ID)
+     * 3. Start worker threads for concurrent operations
+     * 4. Run stress test for specified duration
+     * 5. Report final statistics
+     * 6. Clean up temporary resources
+     */
     public static void main(String[] args) {
         log.info("Starting KMS Stress Test");
         log.info("Region: {}, Role: {}", REGION, ROLE);
@@ -66,10 +90,10 @@ public class Main {
         String temporaryKeyId = null;
         
         try {
-            // Initialize KMS client
+            // Initialize KMS client with temporary credentials from CVM metadata service
             client = initializeKmsClient();
             
-            // Create temporary key for testing if no CMK_ID provided
+            // Create a temporary CMK for testing if none was provided in configuration
             if (CMK_ID == null || CMK_ID.trim().isEmpty()) {
                 log.info("No CMK_ID provided, creating temporary key for testing...");
                 temporaryKeyId = createTemporaryKey(client);
@@ -79,7 +103,7 @@ public class Main {
                 log.info("Using provided CMK: {}", CMK_ID);
             }
             
-            // Create thread pool for concurrent requests
+            // Create fixed-size thread pool for concurrent KMS operations
             ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 CONCURRENCY, // core pool size
                 CONCURRENCY, // maximum pool size  
@@ -99,16 +123,17 @@ public class Main {
 
             executor.allowCoreThreadTimeOut(true);
 
-            // Initialize stats time
+            // Initialize timing for statistics calculation
             lastStatsTime = System.currentTimeMillis();
 
-            // Statistics reporter
+            // Start periodic statistics reporter (reports every 5 seconds)
             ScheduledExecutorService statsReporter = Executors.newScheduledThreadPool(1);
             statsReporter.scheduleAtFixedRate(() -> reportStats(), 5, 5, TimeUnit.SECONDS);
 
+            // Latch to synchronize start of all worker threads
             CountDownLatch startLatch = new CountDownLatch(1);
             
-            // Start worker threads
+            // Create and submit worker threads to executor
             List<KmsWorker> workers = new ArrayList<>(CONCURRENCY);
             List<Future<?>> futures = new ArrayList<>(CONCURRENCY);
 
@@ -119,9 +144,9 @@ public class Main {
                 futures.add(future);
             }
 
-            // Wait for all threads to be active
-            int maxWaitTime = 10000; // 10 seconds max
-            int waitInterval = 3000;  // Check every 100ms
+            // Wait for all worker threads to initialize and be ready
+            int maxWaitTime = 10000; // Maximum 10 seconds to wait for thread startup
+            int waitInterval = 3000;  // Check thread status every 3 seconds
             int waited = 0;
             while (activeThreads.get() < CONCURRENCY && waited < maxWaitTime) {
                 Thread.sleep(waitInterval);
@@ -138,31 +163,31 @@ public class Main {
             log.info("All workers started. Beginning stress test in 3 seconds...");
             Thread.sleep(3000);
             
-            // Start all workers simultaneously
+            // Release the latch to start all workers simultaneously
             long startTime = System.currentTimeMillis();
             startLatch.countDown();
             
-            // Wait for specified duration
+            // Run stress test for the configured duration
             Thread.sleep(DURATION_SECONDS * 1000L);
             
-            // Stop workers gracefully
+            // Gracefully stop all worker threads
             log.info("Stress test duration completed. Stopping workers...");
             
-            // Signal all workers to stop
+            // Signal each worker to stop its operation loop
             for (KmsWorker worker : workers) {
                 worker.stop();
             }
             
-            // Shutdown executor gracefully
+            // Shutdown executor and wait for threads to complete
             executor.shutdown();
             
-            // Wait for threads to finish current operations
+            // Wait for threads to finish current operations (max 10 seconds)
             if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
                 log.warn("Forcing executor shutdown...");
                 executor.shutdownNow();
             }
             
-            // Stop stats reporter
+            // Stop the statistics reporter thread
             statsReporter.shutdown();
             if (!statsReporter.awaitTermination(5, TimeUnit.SECONDS)) {
                 statsReporter.shutdownNow();
@@ -170,13 +195,13 @@ public class Main {
             
             long endTime = System.currentTimeMillis();
             
-            // Final report
+            // Print comprehensive final statistics report
             reportFinalStats(startTime, endTime);
             
         } catch (Exception e) {
             log.error("Stress test failed: {}", e.getMessage(), e);
         } finally {
-            // Cleanup: Delete temporary key if we created one
+            // Clean up: Delete temporary key if one was created for this test
             if (client != null && temporaryKeyId != null) {
                 try {
                     log.info("Cleaning up temporary key: {}", temporaryKeyId);
@@ -186,7 +211,7 @@ public class Main {
                 }
             }
             
-            // Clean shutdown
+            // Allow time for cleanup to complete before exiting
             try {
                 Thread.sleep(2000);
             } catch (InterruptedException e) {
@@ -196,6 +221,13 @@ public class Main {
         }
     }
     
+    /**
+     * Initializes KMS client using temporary credentials from CVM metadata service.
+     * Uses the internal Tencent Cloud endpoint for optimal performance.
+     * 
+     * @return Configured KmsClient instance
+     * @throws Exception if credential retrieval or client initialization fails
+     */
     private static KmsClient initializeKmsClient() throws Exception {
         TemporaryCredential temporaryCredential = MetadataCredentialClient.getTmpAkSkByCvmRole(ROLE);
         Credential cred = new Credential(
@@ -205,11 +237,11 @@ public class Main {
         );
 
         HttpProfile httpProfile = new HttpProfile();
-        httpProfile.setEndpoint("kms.internal.tencentcloudapi.com");
-        // Optimize for performance
-        httpProfile.setReadTimeout(30 * 1000);  // 30 seconds
-        httpProfile.setWriteTimeout(30 * 1000); // 30 seconds
-        httpProfile.setConnTimeout(30 * 1000);  // 30 seconds
+        httpProfile.setEndpoint("kms.internal.tencentcloudapi.com"); // Use internal endpoint for lower latency
+        // Configure timeouts for performance optimization
+        httpProfile.setReadTimeout(30 * 1000);  // 30 seconds read timeout
+        httpProfile.setWriteTimeout(30 * 1000); // 30 seconds write timeout
+        httpProfile.setConnTimeout(30 * 1000);  // 30 seconds connection timeout
 
         ClientProfile clientProfile = new ClientProfile();
         clientProfile.setHttpProfile(httpProfile);
@@ -217,7 +249,14 @@ public class Main {
         return new KmsClient(cred, REGION, clientProfile);
     }
     
-    // ENHANCED: Create temporary key for testing with detailed output
+    /**
+     * Creates a temporary KMS Customer Master Key for testing purposes.
+     * The key will be automatically disabled and scheduled for deletion after the test completes.
+     * 
+     * @param client The initialized KMS client
+     * @return The KeyId of the newly created CMK
+     * @throws Exception if key creation fails
+     */
     private static String createTemporaryKey(KmsClient client) throws Exception {
         log.info("Creating temporary KMS key...");
         
@@ -254,7 +293,14 @@ public class Main {
         return keyId;
     }
     
-    // ENHANCED: Disable and schedule key for deletion with progress output
+    /**
+     * Disables a KMS key and schedules it for deletion after the minimum 7-day period.
+     * This is used to clean up temporary keys created during testing.
+     * 
+     * @param client The initialized KMS client
+     * @param keyId The ID of the key to disable and delete
+     * @throws Exception if key disabling or deletion scheduling fails
+     */
     private static void disableAndScheduleKeyDeletion(KmsClient client, String keyId) throws Exception {
         try {
             log.info("Initiating key cleanup for: {}", keyId);
@@ -292,7 +338,11 @@ public class Main {
         }
     }
     
-    // ENHANCED: Stats reporting with operation ratio info
+    /**
+     * Reports periodic statistics during the stress test.
+     * Called every 5 seconds to show current RPS and operation counts.
+     * Tracks peak RPS values for final reporting.
+     */
     private static void reportStats() {
         long currentTime = System.currentTimeMillis();
         long currentEncryptSuccess = encryptSuccessCount.get();
@@ -341,7 +391,13 @@ public class Main {
         log.info(statsMessage);
     }
     
-    // ENHANCED: Final stats with operation ratio and key info
+    /**
+     * Generates and displays comprehensive final statistics report after stress test completion.
+     * Includes total operations, RPS metrics, peak performance, latency, and success rates.
+     * 
+     * @param startTime Test start time in milliseconds
+     * @param endTime Test end time in milliseconds
+     */
     private static void reportFinalStats(long startTime, long endTime) {
         long totalEncrypt = encryptSuccessCount.get();
         long totalDecrypt = decryptSuccessCount.get();
@@ -402,7 +458,15 @@ public class Main {
         return resp.getCiphertextBlob();
     }
     
-    // Decryption operation
+    /**
+     * Performs a single KMS decryption operation.
+     * Decodes the Base64-encoded plaintext after decryption.
+     * 
+     * @param client The initialized KMS client
+     * @param ciphertext The ciphertext blob to decrypt
+     * @return The decrypted plaintext string
+     * @throws Exception if decryption operation fails
+     */
     private static String performDecryption(KmsClient client, String ciphertext) throws Exception {
         DecryptRequest req = new DecryptRequest();
         req.setCiphertextBlob(ciphertext);
@@ -412,6 +476,11 @@ public class Main {
         return new String(Base64.getDecoder().decode(decryptedBase64), StandardCharsets.UTF_8);
     }
     
+    /**
+     * Worker thread that performs concurrent KMS operations.
+     * Each worker runs continuously until signaled to stop, alternating between
+     * encryption and decryption operations based on configured ratios.
+     */
     static class KmsWorker implements Runnable {
         private final KmsClient client;
         private final int workerId;
@@ -427,17 +496,19 @@ public class Main {
         @Override
         public void run() {
             try {
-                // Wait for start signal
+                // Wait for the start signal from main thread (ensures synchronized start)
                 startLatch.await();
                 activeThreads.incrementAndGet();
                 
                 log.debug("Worker {} started", workerId);
                 
+                // Main operation loop - continues until stopped or interrupted
                 while (running && !Thread.currentThread().isInterrupted()) {
                     try {
                         long startTime = System.currentTimeMillis();
                         
-                        // Use parameterized ratio for encryption/decryption operations
+                        // Determine operation type based on configured ratios
+                        // If no ciphertexts are available for decryption, default to encryption
                         double randomValue = Math.random();
                         if (randomValue < ENCRYPT_RATIO || ciphertextQueue.isEmpty()) {
                             // Perform encryption
@@ -449,11 +520,12 @@ public class Main {
                         
                     } catch (Exception e) {
                         errorCount.incrementAndGet();
+                        // Log errors periodically to avoid flooding logs
                         if (errorCount.get() % 100 == 0) {
                             log.debug("Worker {} operation failed: {}", workerId, e.getMessage());
                         }
                         
-                        // Brief pause on error
+                        // Brief pause on error to prevent tight error loops
                         try {
                             Thread.sleep(10);
                         } catch (InterruptedException ie) {
@@ -473,12 +545,18 @@ public class Main {
             }
         }
         
+        /**
+         * Performs an encryption operation and adds the ciphertext to the queue for later decryption.
+         * 
+         * @param startTime Operation start time for latency calculation
+         * @throws Exception if encryption fails
+         */
         private void performEncryptionOperation(long startTime) throws Exception {
             String plaintext = "quick brown fox-5-1700234567890" + workerId + "-" + System.currentTimeMillis();
             String ciphertext = performEncryption(client, plaintext);
             
-            // Add to ciphertext queue for decryption operations
-            if (ciphertextQueue.size() < 1000) { // Limit queue size to prevent memory issues
+            // Add to ciphertext queue for future decryption operations (limit queue size to prevent memory issues)
+            if (ciphertextQueue.size() < 1000) {
                 ciphertextQueue.offer(ciphertext);
             }
             
@@ -491,7 +569,7 @@ public class Main {
         private void performDecryptionOperation(long startTime) throws Exception {
             String ciphertextToDecrypt = ciphertextQueue.poll();
             
-            // If no ciphertext available, fall back to encryption
+            // If no ciphertext is available in queue, perform encryption instead
             if (ciphertextToDecrypt == null) {
                 performEncryptionOperation(startTime);
                 return;
@@ -505,12 +583,18 @@ public class Main {
             totalLatency.addAndGet(latency);
         }
         
+        /**
+         * Signals this worker to stop processing operations.
+         */
         public void stop() {
             running = false;
         }
     }
     
-    // Simple AtomicDouble implementation since Java doesn't have one
+    /**
+     * Thread-safe atomic double implementation for tracking decimal values.
+     * Java doesn't provide AtomicDouble natively, so we use AtomicLong with bit conversion.
+     */
     static class AtomicDouble {
         private AtomicLong value;
         
